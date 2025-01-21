@@ -34,8 +34,9 @@ def select_number(number):
         pass
 
 def select_box(r,c):
-    a=r*115+70
-    b=c*115+420
+    print(f"Selecting box {r} {c}")
+    a=r*120+70
+    b=c*120+420
     command = f"adb shell input tap {a} {b}"
     res = subprocess.run(command, shell=True, text=True, capture_output=True)
     if res.stderr:
@@ -136,6 +137,8 @@ def displayNumbers(img, numbers, color=(0, 255, 0)):
     return 
 solution=True
 while(solution):
+
+    solved_board_nums = []
 # Capture the screenshot
     stdout, stderr = run_command(capture_command)
     if stderr:
@@ -175,64 +178,25 @@ while(solution):
 
     predicted_numbers = []
 
-    
     # get classes from prediction
     for i in prediction: 
         index = (np.argmax(i)) # returns the index of the maximum number of the array
         predicted_number = classes[index]
         predicted_numbers.append(predicted_number)
 
-
     matrix = [predicted_numbers[i:i + 9] for i in range(0, 81, 9)]
-    print(matrix)
-
-
     # reshape the list 
     board_num = np.array(predicted_numbers).astype('uint8').reshape(9, 9)
-
-
 
     # solve the board
     try:
         print("Solving the sudoku")
         solved_board_nums = get_board(board_num)
-        print(solved_board_nums)
-        # create a binary array of the predicted numbers. 0 means unsolved numbers of sudoku and 1 means given number.
-        binArr = np.where(np.array(predicted_numbers)>0, 0, 1)
-        print(binArr)
-        # get only solved numbers for the solved board
-        flat_solved_board_nums = solved_board_nums.flatten()*binArr
-        # create a mask
-        mask = np.zeros_like(board)
-        # displays solved numbers in the mask in the same position where board numbers are empty
-        solved_board_mask = displayNumbers(mask, flat_solved_board_nums)
-        # cv2.imshow("Solved Mask", solved_board_mask)
-        inv = get_InvPerspective(img, solved_board_mask, location)
-        # cv2.imshow("Inverse Perspective", inv)
-        combined = cv2.addWeighted(img, 0.7, inv, 1, 0)
-        # cv2.namedWindow("Final result", cv2.WINDOW_NORMAL)
-        # cv2.imshow("Final result", combined)
-  
+
     except:
         print("Solution doesn't exist. Model misread digits.")
-    # cv2.imshow("Input image", img)
-    # cv2.imshow("Board", board)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
 
-
-    # for i in range(0,9):
-    #     for j in range(0,9):
-    #         if (matrix[i][j]!=0):
-    #             continue
-    #         else:
-    #             select_box(j,i)
-    #             time.sleep(0.1)
-    #             select_number(solved_board_nums[i][j]) 
-    #             time.sleep(0.1)
-
-
-
+    print(solved_board_nums)
     print("Filling the box")
     coord = [(i, j) for i in range(9) for j in range(9)]
     random.shuffle(coord)
@@ -240,6 +204,7 @@ while(solution):
         if matrix[i][j] != 0:
             continue
         else:
+            print(f"Filling box {i} {j}")
             time.sleep(0.5)
             select_box(j, i)
             time.sleep(0.5)
