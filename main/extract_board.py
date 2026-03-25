@@ -1,67 +1,14 @@
 import cv2
 import numpy as np
 from keras.models import load_model
+import tensorflow as tf
 import imutils
-from solver import *
-import subprocess
-import time
-import random
+import argparse
+import sys
 
-# Define the coordinates for each number
-coordinates = {
-    1: (110, 1900),
-    2: (220, 1900),
-    3: (330, 1900),
-    4: (440, 1900),
-    5: (550, 1900),
-    6: (660, 1900),
-    7: (770, 1900),
-    8: (880, 1900),
-    9: (990, 1900),
-}
-
-def select_number(number):
-    if number not in coordinates:
-        print(f"Error: No coordinates defined for number {number}")
-        return
-    x, y = coordinates[number]
-    command = f"adb shell input tap {x} {y}"
-    result = subprocess.run(command, shell=True, text=True, capture_output=True)
-    if result.stderr:
-        print(f"Error: {result.stderr}")
-    else:
-        print(f"Number {number} is selected")
-        pass
-
-def select_box(r,c):
-    print(f"Selecting box {r} {c}")
-    a=r*120+70
-    b=c*120+420
-    command = f"adb shell input tap {a} {b}"
-    res = subprocess.run(command, shell=True, text=True, capture_output=True)
-    if res.stderr:
-        print(f"Error: {res.stderr}")
-    else:
-        print(f"Location {a} {b} is selected")
-        pass
-
-
-# Define the ADB commands
-capture_command = "adb shell screencap -p /sdcard/screenshot.jpg"
-pull_command = "adb pull /sdcard/screenshot.jpg"
-delete_command = "adb shell rm /sdcard/screenshot.jpg"
-
-def run_command(command):
-    """Run a shell command and return the output."""
-    result = subprocess.run(command, shell=True, text=True, capture_output=True)
-    return result.stdout, result.stderr
-
-classes = np.arange(0, 10)
-
-model = load_model('model-OCR.h5')
-# print(model.summary())
+# Model parameters
 input_size = 48
-
+classes = np.arange(0, 10)
 
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
@@ -83,17 +30,6 @@ def get_perspective(img, location, height=900, width=900):
     matrix = cv2.getPerspectiveTransform(pts1, pts2)
     result = cv2.warpPerspective(img, matrix, (width, height))
     return result
-
-def get_InvPerspective(img, masked_num, location, height = 900, width = 900):
-    """Takes original image as input"""
-    pts1 = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-    pts2 = order_points(location.reshape(4, 2))
-
-    # Apply Perspective Transform Algorithm
-    matrix = cv2.getPerspectiveTransform(pts1, pts2)
-    result = cv2.warpPerspective(masked_num, matrix, (img.shape[1], img.shape[0]))
-    return result
-
 
 def find_board(img):
     """Takes an image as input and finds a sudoku board inside of the image"""
@@ -133,13 +69,12 @@ def find_board(img):
                 break
 
     if location is None:
+        print("Error: Could not find a Sudoku board contour in the image.")
         return None, None
         
     result = get_perspective(img, location)
     return result, location
 
-
-# split the board into 81 individual images
 def split_boxes(board):
     """Takes a sudoku board and split it into 81 cells. 
        each cell contains an element of that board either given or an empty cell."""
@@ -150,16 +85,22 @@ def split_boxes(board):
     for r in rows:
         cols = np.hsplit(r, 9)
         for box in cols:
+            # 1. Crop heavily to remove grid line artifacts (crop 15% from all sides)
             h, w = box.shape
             pad_h, pad_w = int(h * 0.15), int(w * 0.15)
             cropped = box[pad_h:h-pad_h, pad_w:w-pad_w]
             
+            # Blur out minor paper texture noise
             blurred = cv2.GaussianBlur(cropped, (5, 5), 0)
+            
+            # Use Adaptive Threshold with a large constant strictly suppressing shadows and gradients.
             thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 15)
             
+            # Morphological opening to kill leftover speckles
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
             thresh_clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
             
+            # Find contours in the cell
             cnts, _ = cv2.findContours(thresh_clean.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             is_empty = True
@@ -181,6 +122,7 @@ def split_boxes(board):
                         
                 if valid_cnts:
                     is_empty = False
+                    # Get unified bounding box for the digit
                     x_min = min([cv2.boundingRect(c)[0] for c in valid_cnts])
                     y_min = min([cv2.boundingRect(c)[1] for c in valid_cnts])
                     x_max = max([cv2.boundingRect(c)[0] + cv2.boundingRect(c)[2] for c in valid_cnts])
@@ -192,11 +134,20 @@ def split_boxes(board):
                 res = np.zeros((input_size, input_size), dtype=np.float32)
             else:
                 empty_flags.append(False)
+                
+                # Extract clean bounding box of the digit from the original NOT inverted cropped image
+                # Wait, removing shadows completely helps OCR trained on clean lines. 
+                # Let's extract the digit from the thresh_clean (which is white digit on black bg)
                 dx, dy, dw, dh = digit_rect
                 digit_mask = thresh_clean[dy:dy+dh, dx:dx+dw]
+                
+                # Invert back to black digit on white background (what standard OCR expects)
                 digit_img = cv2.bitwise_not(digit_mask)
                 
+                # Center the digit in a 48x48 white background
                 white_bg = np.full((input_size, input_size), 255, dtype=np.uint8)
+                
+                # Keep aspect ratio when scaling the digit to fit nicely within 48x48 (leave a margin)
                 margin = int(input_size * 0.2)
                 tgt_size = input_size - 2 * margin
                 
@@ -205,10 +156,13 @@ def split_boxes(board):
                 
                 resized_digit = cv2.resize(digit_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 
+                # Calculate paste positioning
                 start_x = (input_size - new_w) // 2
                 start_y = (input_size - new_h) // 2
                 
                 white_bg[start_y:start_y+new_h, start_x:start_x+new_w] = resized_digit
+                
+                # Normalize 0-1
                 res = white_bg / 255.0
                 
             boxes.append(res)
@@ -220,108 +174,111 @@ def displayNumbers(img, numbers, color=(0, 255, 0)):
     H = int(img.shape[0]/9)
     for i in range (9):
         for j in range (9):
-            if numbers[(j*9)+i] !=0:
-                cv2.putText(img, str(numbers[(j*9)+i]), (i*W+int(W/2)-int((W/4)), int((j+0.7)*H)), cv2.FONT_HERSHEY_COMPLEX, 2, color, 2, cv2.LINE_AA)
-    return 
-solution=True
-while(solution):
+            if numbers[(j*9)+i] != 0:
+                cv2.putText(img, str(numbers[(j*9)+i]), 
+                            (i*W+int(W/2)-int((W/4)), int((j+0.7)*H)), 
+                            cv2.FONT_HERSHEY_COMPLEX, 1.5, color, 2, cv2.LINE_AA)
+    return img
 
-    solved_board_nums = []
-# Capture the screenshot
-    from numba import cuda
-    print(cuda.is_available())  # Should print True
+def main():
+    parser = argparse.ArgumentParser(description="Extract board and evaluate OCR models (H5 vs TFLite)")
+    parser.add_argument("--image", type=str, default="test_sudokuu.jpg", help="Path to the test image")
+    args = parser.parse_args()
 
+    # 1. Read the image
+    img = cv2.imread(args.image)
+    if img is None:
+        print(f"Error: Could not read image at path: {args.image}")
+        sys.exit(1)
 
-    stdout, stderr = run_command(capture_command)
-    if stderr:
-        print(f"Error capturing screenshot: {stderr}")
-    else:
-        print(f"Screenshot captured: {stdout}")
-
-    # Pull the screenshot to local directory
-    stdout, stderr = run_command(pull_command)
-    if stderr:
-        print(f"Error pulling screenshot: {stderr}")
-    else:
-        print(f"Screenshot pulled: {stdout}")
-
-    # (Optional) Delete the screenshot from the device
-    stdout, stderr = run_command(delete_command)
-    if stderr:
-        print(f"Error deleting screenshot: {stderr}")
-    else:
-        print(f"Screenshot deleted from device: {stdout}")
-
-    # Read image
-    img = cv2.imread('screenshot.jpg')
-
-
-    # extract board from input image
+    # 2. Extract Board
+    print("Finding valid board contour...")
     board, location = find_board(img)
-
     if board is None:
-        print("Board not found. Retrying in 5 seconds...")
-        time.sleep(5)
-        continue
+        sys.exit(1)
 
+    print("Board extracted successfully.")
+
+    # Show the original extraction
+    cv2.imshow("Extracted Board", board)
+    cv2.waitKey(1) # Refresh window
+
+    # 3. Process board into ROIs
     gray = cv2.cvtColor(board, cv2.COLOR_BGR2GRAY)
-    # print(gray.shape)
     rois, empty_flags = split_boxes(gray)
-    rois = np.array(rois).reshape(-1, input_size, input_size, 1)
+    rois_np = np.array(rois).reshape(-1, input_size, input_size, 1).astype(np.float32)
 
-    # get prediction
-    prediction = model.predict(rois)
-    # print(prediction)
-
-    predicted_numbers = []
-
-    # get classes from prediction
-    for idx, p in enumerate(prediction): 
-        if empty_flags[idx]:
-            predicted_number = 0
-        else:
-            index = (np.argmax(p)) # returns the index of the maximum number of the array
-            predicted_number = classes[index]
-        predicted_numbers.append(predicted_number)
-
-    matrix = [predicted_numbers[i:i + 9] for i in range(0, 81, 9)]
-    # reshape the list 
-    board_num = np.array(predicted_numbers).astype('uint8').reshape(9, 9)
-
-    # solve the board
-    try:
-        print("Solving the sudoku")
-        solved_board_nums = get_board(board_num)
-
-    except:
-        print("Solution doesn't exist. Model misread digits.")
-
-    print(solved_board_nums)
-    print("Filling the box")
-    coord = [(i, j) for i in range(9) for j in range(9)]
-    random.shuffle(coord)
-    for i, j in coord:
-        if matrix[i][j] != 0:
-            continue
-        else:
-            print(f"Filling box {i} {j}")
-            # time.sleep(0.5)
-            select_box(j, i)
-            # time.sleep(0.5)
-            select_number(solved_board_nums[i][j])
-            # time.sleep(0.5)
-
-    print("Congratulations puzzle has been solved")
-    time.sleep(4)
-    command = f"adb shell input tap 500 2200"
-    result = subprocess.run(command, shell=True, text=True, capture_output=True)
-    time.sleep(3)
-    command = f"adb shell input tap 500 2000"
-    result = subprocess.run(command, shell=True, text=True, capture_output=True)
-    time.sleep(1)
-    command = f"adb shell input tap 500 1900"
-    result = subprocess.run(command, shell=True, text=True, capture_output=True)
+    # 4. Load Models and Predict
+    # -- H5 Model --
+    print("Loading H5 Model...")
+    h5_model = load_model("model-OCR.h5")
+    print("Running inference on H5 model...")
+    h5_predsRaw = h5_model.predict(rois_np)
     
-    print("Starting the new puzzle")
-    time.sleep(5)
+    h5_preds = []
+    for i, p in enumerate(h5_predsRaw):
+        if empty_flags[i]:
+            h5_preds.append(0)
+        else:
+            h5_preds.append(classes[np.argmax(p)])
+    
+    # -- TFLite Model --
+    print("Loading TFLite Model...")
+    interpreter = tf.lite.Interpreter(model_path="model-OCR.tflite")
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    
+    # TFLite might expect float32
+    input_index = input_details[0]['index']
+    output_index = output_details[0]['index']
+    
+    tflite_preds = []
+    print("Running inference on TFLite model...")
+    for i, roi in enumerate(rois_np):
+        if empty_flags[i]:
+            tflite_preds.append(0)
+            continue
+            
+        roi_input = np.expand_dims(roi, axis=0) # Shape: (1, 48, 48, 1)
+        interpreter.set_tensor(input_index, roi_input)
+        interpreter.invoke()
+        output = interpreter.get_tensor(output_index)
+        tflite_preds.append(classes[np.argmax(output)])
 
+    # 5. Output Results
+    print("\n--- Model Evaluation Results ---")
+    
+    print("\nH5 Model Output:")
+    h5_matrix = np.array(h5_preds).reshape(9, 9)
+    print(h5_matrix)
+
+    print("\nTFLite Model Output:")
+    tflite_matrix = np.array(tflite_preds).reshape(9, 9)
+    print(tflite_matrix)
+    
+    print("\nDifferences (H5 vs TFLite):")
+    diffs = 0
+    for r in range(9):
+        for c in range(9):
+            if h5_matrix[r][c] != tflite_matrix[r][c]:
+                print(f"Row {r} Col {c} : H5 = {h5_matrix[r][c]} | TFLite = {tflite_matrix[r][c]}")
+                diffs += 1
+    if diffs == 0:
+        print("No differences found. Both models output the exact same predictions.")
+
+    # 6. Display visually
+    h5_board_render = board.copy()
+    displayNumbers(h5_board_render, h5_preds, color=(0, 255, 0))
+    cv2.imshow("H5 Predictions", h5_board_render)
+
+    tflite_board_render = board.copy()
+    displayNumbers(tflite_board_render, tflite_preds, color=(255, 0, 0))
+    cv2.imshow("TFLite Predictions", tflite_board_render)
+    
+    print("\nPress any key in the image windows to close and exit.")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
