@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sudoku Solver</string>
+    <string name="accessibility_service_description">This service allows Sudoku Solver to automatically fill in puzzle solutions by simulating tap gestures on the screen. Enable this service to use the auto-solve overlay feature.</string>
+</resources>

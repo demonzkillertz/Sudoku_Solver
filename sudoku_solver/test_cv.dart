@@ -1,0 +1,1 @@
+﻿import 'package:opencv_dart/opencv_dart.dart' as cv; void main() { var mat = cv.Mat.zeros(100,100, cv.MatType.CV_8UC1); cv.circle(mat, cv.Point(50,50), 10, cv.Scalar(255,255,255), thickness: -1); var (contours, _) = cv.findContours(mat, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE); var list = contours.toList(); print(list[0].runtimeType); }
